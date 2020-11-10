@@ -4,12 +4,12 @@ It is non-official Golang SDK for [Jackett](https://github.com/Jackett/Jackett).
 
 Example usage:
 
-```
+```golang
 package main
 
 import (
 	"log"
-
+	"context"
 	"github.com/webtor-io/go-jackett"
 )
 
@@ -37,6 +37,6 @@ As ApiUrl just use root url of your Jackett instance. ApiKey could be found at t
 It is also possible to get Jackett credentials from environment variables `JACKETT_API_URL` and `JACKETT_API_KEY`.
 In this case just provide empty settings like so:
 
-```
+```golang
 j := jackett.NewJackett(&jackett.Settings{})
 ```
