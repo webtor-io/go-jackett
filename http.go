@@ -19,10 +19,38 @@ func getXML[T any](ctx context.Context, client *http.Client, url string) (T, err
 	if err != nil {
 		return data, err
 	}
+	if err := checkErrorDoc(b); err != nil {
+		return data, err
+	}
 	if err := xml.Unmarshal(b, &data); err != nil {
 		return data, fmt.Errorf("unmarshal response data: %s: %w\n%s", url, err, string(b))
 	}
 	return data, nil
+}
+
+// errorResp is Torznab's in-band error document. XMLName pins the root
+// element, so unmarshalling any other document into it fails — which is
+// exactly how we tell an error apart from a real response.
+type errorResp struct {
+	XMLName     xml.Name `xml:"error"`
+	Code        string   `xml:"code,attr"`
+	Description string   `xml:"description,attr"`
+}
+
+// checkErrorDoc surfaces the error document indexers return with HTTP 200.
+// A caps request is where this matters most: an unauthenticated caps
+// response otherwise unmarshals into an empty, entirely plausible-looking
+// capabilities struct, so a wrong API key reads as "this indexer supports
+// nothing" instead of "your key is wrong".
+func checkErrorDoc(b []byte) error {
+	var e errorResp
+	if err := xml.Unmarshal(b, &e); err != nil {
+		return nil
+	}
+	if e.Code == "" && e.Description == "" {
+		return nil
+	}
+	return fmt.Errorf("indexer returned an error: %s: %s", e.Code, e.Description)
 }
 
 func getBytes(ctx context.Context, client *http.Client, url string) ([]byte, error) {

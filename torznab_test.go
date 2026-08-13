@@ -272,3 +272,26 @@ func TestSettingsUserAgent(t *testing.T) {
 		t.Errorf("default user agent = %q, want go-jackett/<version>", agents[1])
 	}
 }
+
+func TestCapsSurfacesErrorDocument(t *testing.T) {
+	// A wrong API key answers a caps request with HTTP 200 and an error
+	// document. Unmarshalled into IndexerCaps that yields an empty struct,
+	// so without the check the caller is told the indexer supports no
+	// search modes — pointing the user at the wrong problem entirely.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><error code="100" description="Incorrect user credentials"/>`))
+	}))
+	defer srv.Close()
+
+	j, err := NewTorznab(Settings{ApiURL: srv.URL, ApiKey: "wrong"})
+	if err != nil {
+		t.Fatalf("NewTorznab() error = %v", err)
+	}
+	_, err = j.Caps(context.Background(), "")
+	if err == nil {
+		t.Fatal("Caps() accepted an error document")
+	}
+	if !strings.Contains(err.Error(), "Incorrect user credentials") {
+		t.Errorf("error = %v, want the indexer's description", err)
+	}
+}
