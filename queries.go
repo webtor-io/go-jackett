@@ -7,6 +7,27 @@ import (
 	"github.com/google/go-querystring/query"
 )
 
+// ownedParams are the query parameters a FetchRequest controls. In
+// Torznab-endpoint mode they are stripped from the pasted feed URL so a
+// stale value cannot leak into a later query. "cat" is deliberately absent:
+// it is inherited when a request sets no categories of its own.
+//
+// TestOwnedParamsCoversEveryBuilder guards this list against drift.
+var ownedParams = map[string]struct{}{
+	"t": {}, "extended": {}, "q": {},
+	"imdbid": {}, "tvdbid": {}, "tmdbid": {}, "tracktid": {},
+	"doubanid": {}, "tvmazeid": {}, "rid": {},
+	"season": {}, "ep": {}, "year": {}, "genre": {},
+	"artist": {}, "album": {}, "label": {}, "track": {},
+	"title": {}, "author": {}, "publisher": {},
+	"limit": {}, "offset": {},
+}
+
+func isOwnedParam(k string) bool {
+	_, ok := ownedParams[k]
+	return ok
+}
+
 // FetchRequest represents a fetch or search request.
 // Only one field should be provided depending on your search needs.
 // You may build this struct by hand or use the provided builder functions.

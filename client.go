@@ -33,6 +33,10 @@ type Settings struct {
 	// DefaultTrackers is a list of tracker IDs to use if a FetchRequest does not specify any.
 	// If empty and a FetchRequest does not specify trackers, "all" trackers will be used.
 	DefaultTrackers []string
+
+	// UserAgent is sent with every request. If empty, the library
+	// identifies itself as go-jackett/<version>.
+	UserAgent string
 }
 
 // Client is a Jackett API client.
@@ -40,6 +44,10 @@ type Client struct {
 	apiURL *url.URL
 	cfg    Settings
 	tcache sync.Map
+	// endpoint is set by NewTorznab: apiURL is then a complete Torznab
+	// feed URL rather than a Jackett API root, and no indexer path is
+	// constructed from it.
+	endpoint bool
 }
 
 const (
@@ -52,7 +60,23 @@ const (
 // Environment variables JACKETT_API_URL and JACKETT_API_KEY can be used
 // as fallbacks if ApiURL or ApiKey are not provided in Settings.
 func New(s Settings) (*Client, error) {
-	j := Client{cfg: s}
+	return newClient(s, false)
+}
+
+// NewTorznab creates a client for a single Torznab endpoint. ApiURL is used
+// as given — it is the feed URL itself, not a Jackett API root — so the
+// client also speaks to Prowlarr, NZBHydra2 and a tracker's own feed, none
+// of which expose Jackett's /api/v2.0/indexers/<id>/results/torznab layout.
+//
+// Trackers, DefaultTrackers and ListIndexers are Jackett-specific and do
+// not apply: the endpoint is whatever the URL points at, which may itself
+// be an aggregate over many trackers.
+func NewTorznab(s Settings) (*Client, error) {
+	return newClient(s, true)
+}
+
+func newClient(s Settings, endpoint bool) (*Client, error) {
+	j := Client{cfg: s, endpoint: endpoint}
 	apiURLStr := valOrEnv(s.ApiURL, envAPIURL)
 	apiURL, err := url.Parse(apiURLStr)
 	if err != nil {
@@ -60,18 +84,30 @@ func New(s Settings) (*Client, error) {
 	}
 	j.apiURL = apiURL
 
-	if j.cfg.Client == nil {
-		j.cfg.Client = http.DefaultClient
+	// The api-key middleware is per-client, so it must go on a copy of the
+	// caller's http.Client rather than on the client itself. Mutating the
+	// original would install one client's key on every other client sharing
+	// it — including http.DefaultClient, process-wide — and with several
+	// clients built from one http.Client the wrapped transports stack, so
+	// requests to a host two of them share end up carrying whichever key
+	// was installed last.
+	base := s.Client
+	if base == nil {
+		base = http.DefaultClient
 	}
-	j.cfg.Client.Transport = wrapTransport(j.cfg.Client.Transport,
+	copied := *base
+	copied.Transport = wrapTransport(base.Transport,
 		j.apiURL,
-		valOrEnv(s.ApiKey, envAPIKey))
+		valOrEnv(s.ApiKey, envAPIKey),
+		s.UserAgent)
+	j.cfg.Client = &copied
 	return &j, nil
 }
 
 type fetchOpts struct {
 	MaxConcurrency     int
 	ProgressReportFunc func(complete uint, total uint)
+	SkipCapsValidation bool
 }
 
 // FetchOption is a function that configures a Fetch operation.
@@ -82,6 +118,18 @@ type FetchOption func(*fetchOpts)
 func WithMaxConcurrency(n uint) FetchOption {
 	return func(o *fetchOpts) {
 		o.MaxConcurrency = int(n)
+	}
+}
+
+// WithoutCapsValidation skips the pre-flight capability check.
+//
+// Fetch normally asks every target for its caps before querying it, so an
+// unsupported query fails as an *UnsupportedError instead of as an empty
+// result. Callers that already know the capabilities — because they keep
+// their own snapshot of them — can skip that round-trip.
+func WithoutCapsValidation() FetchOption {
+	return func(o *fetchOpts) {
+		o.SkipCapsValidation = true
 	}
 }
 
@@ -121,8 +169,11 @@ func (j *Client) Fetch(ctx context.Context, fr *FetchRequest, opts ...FetchOptio
 	// Ensure that all selected trackers support this query
 	for _, u := range urls {
 		wg.Go(func() error {
+			if o.SkipCapsValidation {
+				return nil
+			}
 			tracker := extractTracker(u.Path)
-			if tracker == "all" {
+			if !j.endpoint && tracker == "all" {
 				return nil // can't check caps of meta indexers
 			}
 			caps, err := j.getIndexerCaps(ctx, tracker)
@@ -183,24 +234,62 @@ func (j *Client) ListIndexers(ctx context.Context) ([]IndexerDetails, error) {
 	return idxs.Indexers, err
 }
 
+// Caps returns the capabilities of an indexer, cached per client.
+//
+// In Torznab-endpoint mode the id is ignored — the endpoint reports its own
+// capabilities. In Jackett mode it is the indexer id ("all" for the meta
+// indexer).
+func (j *Client) Caps(ctx context.Context, id string) (IndexerCaps, error) {
+	return j.getIndexerCaps(ctx, id)
+}
+
 func (j *Client) getIndexerCaps(ctx context.Context, id string) (IndexerCaps, error) {
+	if j.endpoint {
+		id = ""
+	}
 	if v, ok := j.tcache.Load(id); ok {
 		return v.(IndexerCaps), nil
 	}
 	u := *j.apiURL
-	u.Path = fmt.Sprintf("/api/v2.0/indexers/%s/results/torznab", id)
+	if !j.endpoint {
+		u.Path = fmt.Sprintf("/api/v2.0/indexers/%s/results/torznab", id)
+	}
 	q := u.Query()
-	q.Add("t", "caps")
+	q.Set("t", "caps")
 	u.RawQuery = q.Encode()
 	caps, err := getXML[IndexerCaps](ctx, j.cfg.Client, u.String())
 	if err != nil {
-		return caps, fmt.Errorf("list indexers: %w", err)
+		return caps, fmt.Errorf("get caps: %w", err)
 	}
 	j.tcache.Store(id, caps)
 	return caps, nil
 }
 
 func (j *Client) generateFetchURLs(fr *FetchRequest) ([]url.URL, error) {
+	if j.endpoint {
+		u := *j.apiURL
+		q, err := fr.Values()
+		if err != nil {
+			return nil, fmt.Errorf("marshal url: %w", err)
+		}
+		// Whatever else the pasted feed URL carried stays as a default —
+		// but never a search parameter. A URL copied out of a browser
+		// address bar brings the last query along with it, and inheriting
+		// its q= would and-search every later request against a stale
+		// term. Categories are the one search parameter left inheritable,
+		// so a user can paste a category-filtered feed and have it apply
+		// to requests that set no categories of their own.
+		for k, vs := range u.Query() {
+			if isOwnedParam(k) {
+				continue
+			}
+			if _, ok := q[k]; !ok {
+				q[k] = vs
+			}
+		}
+		u.RawQuery = q.Encode()
+		return []url.URL{u}, nil
+	}
 	trackers := fr.Trackers()
 	if len(trackers) == 0 {
 		trackers = j.cfg.DefaultTrackers

@@ -13,3 +13,6 @@
 *.db
 
 .envrc
+
+.env
+.idea

@@ -45,7 +45,7 @@ func getBytes(ctx context.Context, client *http.Client, url string) ([]byte, err
 var _ http.RoundTripper = (*middleware)(nil)
 
 // wrapTransport wraps the given http.Transport with a middleware that adds the user agent to all outgoing requests. It also adds the api key to all requests matching BaseURL.
-func wrapTransport(rt http.RoundTripper, base *url.URL, apiKey string) http.RoundTripper {
+func wrapTransport(rt http.RoundTripper, base *url.URL, apiKey, userAgent string) http.RoundTripper {
 	if rt == nil {
 		rt = http.DefaultTransport
 	}
@@ -53,6 +53,7 @@ func wrapTransport(rt http.RoundTripper, base *url.URL, apiKey string) http.Roun
 		Transport: rt,
 		BaseURL:   base,
 		APIKey:    apiKey,
+		UserAgent: userAgent,
 	}
 }
 
@@ -60,10 +61,18 @@ type middleware struct {
 	Transport http.RoundTripper
 	BaseURL   *url.URL
 	APIKey    string
+	// UserAgent overrides the library's own identifier. Trackers do reject
+	// or throttle by user agent, so the calling service has to be able to
+	// decide what it presents itself as.
+	UserAgent string
 }
 
 func (m *middleware) RoundTrip(r *http.Request) (*http.Response, error) {
-	r.Header.Set("User-Agent", ua())
+	if m.UserAgent != "" {
+		r.Header.Set("User-Agent", m.UserAgent)
+	} else {
+		r.Header.Set("User-Agent", ua())
+	}
 
 	if m.matchesTarget(r.URL) {
 		q := r.URL.Query()

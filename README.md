@@ -3,7 +3,9 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/webtor-io/go-jackett)](https://goreportcard.com/report/github.com/webtor-io/go-jackett)
 [![MIT license](http://img.shields.io/badge/license-MIT-brightgreen.svg)](http://opensource.org/licenses/MIT)
 
-It is non-official Golang SDK for [Jackett](https://github.com/Jackett/Jackett).
+It is non-official Golang SDK for [Jackett](https://github.com/Jackett/Jackett),
+and — through `NewTorznab` — a client for any [Torznab](https://torznab.github.io/spec-1.3-draft/torznab/Specification-v1.3.html)
+endpoint: Prowlarr, NZBHydra2 or a tracker's own feed.
 
 Example usage:
 
@@ -38,6 +40,44 @@ func main() {
     }
 }
 ```
+
+## Arbitrary Torznab endpoints
+
+`New` expects a Jackett API root and builds
+`/api/v2.0/indexers/<id>/results/torznab` paths from it. `NewTorznab` instead
+takes the feed URL itself, so it also speaks to implementations that have no
+such layout:
+
+```go
+j, err := jackett.NewTorznab(jackett.Settings{
+    // Whatever the indexer's UI handed you — Jackett's "Copy Torznab Feed",
+    // a Prowlarr indexer URL, a tracker's own feed.
+    ApiURL:    "https://prowlarr.example.com/api/v1/indexer/3/newznab",
+    ApiKey:    "YOUR_API_KEY",
+    UserAgent: "my-app/1.0",
+})
+if err != nil {
+    panic(err)
+}
+
+// Capabilities of the endpoint itself; the id is ignored in this mode.
+caps, err := j.Caps(ctx, "")
+
+results, err := j.Fetch(ctx, jackett.NewTVSearch().
+    WithIMDBID("1839578").
+    WithSeason(5).
+    WithEpisode(14).
+    Build(),
+    // Skip the pre-flight capability probe when you already keep a snapshot
+    // of the endpoint's caps — it saves a request per search.
+    jackett.WithoutCapsValidation())
+```
+
+Query parameters already present in the URL are kept as defaults, except the
+search parameters a request owns: a stale `q=` copied out of a browser
+address bar never leaks into a later query. `Trackers`, `DefaultTrackers` and
+`ListIndexers` are Jackett-specific and do not apply — the endpoint may
+itself be an aggregate over many trackers.
 
 As `ApiURL` just use root URL of your Jackett instance. `ApiKey` could be found at the top of Jackett UI.
 

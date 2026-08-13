@@ -536,3 +536,35 @@ func newTestJackett(t *testing.T) *Client {
 	}
 	return j
 }
+
+// TestOwnedParamsCoversEveryBuilder keeps ownedParams honest: any parameter
+// a builder can emit must be listed there, or a stale copy of it in a
+// pasted endpoint URL would survive into every later query.
+func TestOwnedParamsCoversEveryBuilder(t *testing.T) {
+	requests := []*FetchRequest{
+		NewRawSearch().WithQuery("q").WithCategories(2000).Build(),
+		NewMovieSearch().WithQuery("q").WithYear(1999).WithGenre("g").WithIMDBID("tt1").
+			WithTracktID(1).WithDoubanID(2).WithCategories(2000).Build(),
+		NewTVSearch().WithQuery("q").WithSeason(1).WithEpisode(2).WithIMDBID("tt1").
+			WithTVDBID(3).WithRageID(4).WithTMDBID(5).WithTVMazeID(6).WithYear(2000).
+			WithGenre("g").WithTracktID(7).WithDoubanID(8).Build(),
+		NewMusicSearch().WithQuery("q").WithAlbum("a").WithArtist("b").WithLabel("c").
+			WithTrack("d").WithYear(2000).WithGenre("g").Build(),
+		NewBookSearch().WithQuery("q").WithTitle("t").WithAuthor("a").WithPublisher("p").
+			WithGenre("g").WithYear(2000).Build(),
+	}
+	for _, fr := range requests {
+		v, err := fr.Values()
+		if err != nil {
+			t.Fatalf("Values() error = %v", err)
+		}
+		for k := range v {
+			if k == "cat" {
+				continue // intentionally inheritable
+			}
+			if !isOwnedParam(k) {
+				t.Errorf("parameter %q is emitted by a builder but missing from ownedParams", k)
+			}
+		}
+	}
+}

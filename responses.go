@@ -129,10 +129,15 @@ type searchItem struct {
 		Length int64  `xml:"length,attr"`
 		Type   string `xml:"type,attr"`
 	} `xml:"enclosure"`
+	// Namespace is deliberately left off: the same feed is served as
+	// <torznab:attr> by Jackett and Prowlarr and as <newznab:attr> by
+	// indexers exposing the Newznab flavour, and binding to the Torznab
+	// namespace alone drops every attribute — seeders and infohash
+	// included — on the latter.
 	TorznabAttrs []struct {
 		Name  string `xml:"name,attr"`
 		Value string `xml:"value,attr"`
-	} `xml:"http://torznab.com/schemas/2015/feed attr"`
+	} `xml:"attr"`
 }
 
 func (i *searchItem) Unmarshal() (Result, error) {
@@ -158,7 +163,18 @@ func (i *searchItem) Unmarshal() (Result, error) {
 	r.BackdropURL = i.tAttr("backdropurl")
 	r.Link = i.Link
 	r.MagnetURI = i.tAttr("magneturl")
+	if r.MagnetURI == "" {
+		// Public trackers routinely ship the magnet as the item link or
+		// the enclosure url instead of as an attribute.
+		r.MagnetURI = firstMagnet(i.Link, i.Enclosure.URL)
+	}
 	r.Size = i.Size
+	if r.Size == 0 && i.Enclosure.Length > 0 {
+		r.Size = uint64(i.Enclosure.Length)
+	}
+	if r.Link == "" {
+		r.Link = i.Enclosure.URL
+	}
 	r.Files = i.Files
 	r.IMDBID = i.tAttr("imdbid")
 	r.TVDBID = i.tAttr("tvdbid")
@@ -191,8 +207,36 @@ func (i *searchItem) tAttr(name string) string {
 	return ""
 }
 
+// pubDateLayouts covers the spellings seen in the wild. The spec says
+// RFC-822, but feeds disagree on whether the zone is numeric or named and
+// a few emit RFC-3339 outright.
+var pubDateLayouts = []string{
+	time.RFC1123Z,
+	time.RFC1123,
+	time.RFC822Z,
+	time.RFC822,
+	time.RFC3339,
+}
+
 func (i *searchItem) parsePubDate() (time.Time, error) {
-	return time.Parse(time.RFC1123Z, i.PubDate)
+	var err error
+	for _, layout := range pubDateLayouts {
+		var t time.Time
+		if t, err = time.Parse(layout, i.PubDate); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, err
+}
+
+// firstMagnet returns the first candidate that is a magnet URI.
+func firstMagnet(candidates ...string) string {
+	for _, c := range candidates {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c)), "magnet:") {
+			return c
+		}
+	}
+	return ""
 }
 
 type indexersResp struct {
