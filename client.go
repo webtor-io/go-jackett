@@ -28,6 +28,12 @@ type Settings struct {
 
 	// Client is the HTTP client to use for making requests.
 	// If nil, http.DefaultClient will be used.
+	//
+	// A copy is taken at construction time and the api-key middleware is
+	// installed on the copy, so the caller's client is left untouched and
+	// several clients may share one. Two consequences: changes made to the
+	// client after New returns are not picked up, and requests the caller
+	// makes through its own client do not get the api key.
 	Client *http.Client
 
 	// DefaultTrackers is a list of tracker IDs to use if a FetchRequest does not specify any.
@@ -180,8 +186,16 @@ func (j *Client) Fetch(ctx context.Context, fr *FetchRequest, opts ...FetchOptio
 			if err != nil {
 				return fmt.Errorf("get indexer caps: %s: %w", tracker, err)
 			}
-			if err := caps.Validate(u.Query()); err != nil {
-				return fmt.Errorf("%s does not support this query: %w", tracker, err)
+			// Validate what the request asks for, not the whole URL: in
+			// endpoint mode the URL also carries whatever the pasted feed
+			// URL brought along (an apikey, a tracker's own parameter),
+			// and no indexer advertises those in supportedParams.
+			own, err := fr.Values()
+			if err != nil {
+				return fmt.Errorf("marshal url: %w", err)
+			}
+			if err := caps.Validate(own); err != nil {
+				return fmt.Errorf("%s does not support this query: %w", targetName(tracker, u), err)
 			}
 			return nil
 		})
@@ -203,7 +217,7 @@ func (j *Client) Fetch(ctx context.Context, fr *FetchRequest, opts ...FetchOptio
 			}()
 			resp, err := getXML[searchResp](ctx, j.cfg.Client, url.String())
 			if err != nil {
-				return fmt.Errorf("fetch: %s: %w", url.String(), err)
+				return fmt.Errorf("fetch: %s: %w", redactURL(url.String()), err)
 			}
 			results[i], err = resp.Unmarshal()
 			return err
@@ -310,6 +324,15 @@ func (j *Client) generateFetchURLs(fr *FetchRequest) ([]url.URL, error) {
 		urls = append(urls, u)
 	}
 	return urls, nil
+}
+
+// targetName labels a target in error messages. Endpoint mode has no
+// tracker id to report, so the host stands in for it.
+func targetName(tracker string, u url.URL) string {
+	if tracker != "" {
+		return tracker
+	}
+	return u.Host
 }
 
 func valOrEnv(v, env string) string {

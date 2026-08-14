@@ -73,9 +73,14 @@ type Result struct {
 }
 
 type searchResp struct {
-	Version   string `xml:"version,attr"`
-	ErrorCode int    `xml:"code,attr"`
-	ErrorDesc string `xml:"description,attr"`
+	// XMLName pins the root element. Without it any XML document — an
+	// HTML error page, a JSON-ish blob, someone else's API — unmarshals
+	// into an empty feed, and the caller cannot tell "not a feed" from
+	// "no results".
+	XMLName   xml.Name `xml:"rss"`
+	Version   string   `xml:"version,attr"`
+	ErrorCode int      `xml:"code,attr"`
+	ErrorDesc string   `xml:"description,attr"`
 	Channel   struct {
 		AtomLink struct {
 			Href string `xml:"href,attr"`

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -23,7 +24,11 @@ func getXML[T any](ctx context.Context, client *http.Client, url string) (T, err
 		return data, err
 	}
 	if err := xml.Unmarshal(b, &data); err != nil {
-		return data, fmt.Errorf("unmarshal response data: %s: %w\n%s", url, err, string(b))
+		// The response body is deliberately not included. Callers expose
+		// these errors to their own users, and the body is whatever the
+		// endpoint returned — which, after a redirect, may be a page from
+		// somewhere the caller never intended to fetch.
+		return data, fmt.Errorf("unmarshal response data: %s: %w", url, err)
 	}
 	return data, nil
 }
@@ -35,6 +40,24 @@ type errorResp struct {
 	XMLName     xml.Name `xml:"error"`
 	Code        string   `xml:"code,attr"`
 	Description string   `xml:"description,attr"`
+	// Some implementations put the message in the element body instead of
+	// the description attribute.
+	Message string `xml:",chardata"`
+}
+
+// IndexerError is an error the indexer itself reported, as opposed to a
+// transport or parsing failure. Callers can use errors.As to tell a
+// rejected API key apart from an unreachable host.
+type IndexerError struct {
+	Code        string
+	Description string
+}
+
+func (e *IndexerError) Error() string {
+	if e.Code == "" {
+		return fmt.Sprintf("indexer returned an error: %s", e.Description)
+	}
+	return fmt.Sprintf("indexer returned an error: %s: %s", e.Code, e.Description)
 }
 
 // checkErrorDoc surfaces the error document indexers return with HTTP 200.
@@ -47,11 +70,29 @@ func checkErrorDoc(b []byte) error {
 	if err := xml.Unmarshal(b, &e); err != nil {
 		return nil
 	}
-	if e.Code == "" && e.Description == "" {
+	desc := strings.TrimSpace(e.Description)
+	if desc == "" {
+		desc = strings.TrimSpace(e.Message)
+	}
+	if e.Code == "" && desc == "" {
 		return nil
 	}
-	return fmt.Errorf("indexer returned an error: %s: %s", e.Code, e.Description)
+	return &IndexerError{Code: e.Code, Description: desc}
 }
+
+// redactURL hides credential-carrying query parameters so a URL can appear
+// in an error message. Endpoint URLs are pasted by end users and may embed
+// the key, and callers log these errors.
+func redactURL(raw string) string {
+	return secretParams.ReplaceAllString(raw, "$1=***")
+}
+
+var secretParams = regexp.MustCompile(`(?i)\b(apikey|api_key|jackett_apikey|passkey|rss_?key|token)=([^&\s"']+)`)
+
+// maxBodyBytes caps what a single response may contribute. A 100-item feed
+// is well under a megabyte; without a cap an endpoint — which is user-
+// supplied for most callers — can stream until the process dies.
+const maxBodyBytes = 8 << 20
 
 func getBytes(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -63,7 +104,12 @@ func getBytes(ctx context.Context, client *http.Client, url string) ([]byte, err
 		return nil, fmt.Errorf("invoke fetch request: %w", err)
 	}
 	defer res.Body.Close()
-	b, err := io.ReadAll(res.Body)
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		// Reported before parsing, so a login page or a 404 says what it
+		// is instead of surfacing as malformed XML.
+		return nil, fmt.Errorf("fetch %s: unexpected status %d", url, res.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(res.Body, maxBodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read respose: %w", err)
 	}
@@ -96,19 +142,27 @@ type middleware struct {
 }
 
 func (m *middleware) RoundTrip(r *http.Request) (*http.Response, error) {
+	// RoundTrip must not modify the request it is given, and here that rule
+	// has teeth: writing the key into r.URL leaves it in the URL the
+	// http.Client reports in every *url.Error, and in the Referer it sends
+	// on a cross-host redirect. Callers then log or display an error that
+	// carries the credential.
+	r2 := r.Clone(r.Context())
 	if m.UserAgent != "" {
-		r.Header.Set("User-Agent", m.UserAgent)
+		r2.Header.Set("User-Agent", m.UserAgent)
 	} else {
-		r.Header.Set("User-Agent", ua())
+		r2.Header.Set("User-Agent", ua())
 	}
 
-	if m.matchesTarget(r.URL) {
-		q := r.URL.Query()
+	if m.APIKey != "" && m.matchesTarget(r2.URL) {
+		u := *r2.URL
+		q := u.Query()
 		q.Set("apikey", m.APIKey)
-		r.URL.RawQuery = q.Encode()
+		u.RawQuery = q.Encode()
+		r2.URL = &u
 	}
 
-	return m.Transport.RoundTrip(r)
+	return m.Transport.RoundTrip(r2)
 }
 
 func (m *middleware) matchesTarget(reqURL *url.URL) bool {

@@ -20,7 +20,9 @@ var ownedParams = map[string]struct{}{
 	"season": {}, "ep": {}, "year": {}, "genre": {},
 	"artist": {}, "album": {}, "label": {}, "track": {},
 	"title": {}, "author": {}, "publisher": {},
-	"limit": {}, "offset": {},
+	// limit and offset are deliberately absent: no builder emits them, so
+	// owning them would strip a pasted ?limit= and put nothing in its
+	// place, silently falling back to the indexer's default page size.
 }
 
 func isOwnedParam(k string) bool {
